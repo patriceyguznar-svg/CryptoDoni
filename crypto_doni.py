@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CryptoDoni v16 — USDT 100% + КРАСИВЫЙ ОТВЕТ
+CryptoDoni v18 — ДЕБАГ + USDT + КРАСИВО
 """
 
 import os
@@ -23,6 +23,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TRONGRID_API_KEY = os.getenv("TRONGRID_API_KEY")
 
+print(f"КЛЮЧИ: TOKEN=OK, OPENAI={'OK' if OPENAI_API_KEY else 'НЕТ'}, TRONGRID={'OK' if TRONGRID_API_KEY else 'НЕТ'}")
+
 if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, TRONGRID_API_KEY]):
     print("ОШИБКА: Проверь переменные в Render!")
     exit(1)
@@ -39,7 +41,7 @@ USDT_CONTRACT = "TR7NHqjeKQxGTCuuP8qACi7c3eN6T5z"
 # Веб-сервер
 # ==========================
 async def handle(request):
-    return web.Response(text="CryptoDoni v16 — alive")
+    return web.Response(text="CryptoDoni v18 — alive")
 
 async def start_web_server():
     app = web.Application()
@@ -49,7 +51,7 @@ async def start_web_server():
     port = int(os.getenv("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"Веб на порту {port}")
+    print(f"Веб-сервер запущен на порту {port}")
 
 # ==========================
 # Проверка кошелька
@@ -60,58 +62,62 @@ async def check_wallet(address: str) -> dict:
         "trx": 0.0,
         "usdt": 0.0,
         "total_usd": 0.0,
-        "txs": []
+        "txs": [],
+        "debug": ""
     }
 
     try:
-        async with aiohttp.ClientSession(headers=HEADERS) as session:
+        async with aiohttp.ClientSession(headers=HEADERS, timeout=aiohttp.ClientTimeout(total=15)) as session:
             # === 1. БАЛАНС ===
             url = f"https://api.trongrid.io/v1/accounts/{address}"
+            print(f"Запрос баланса: {url}")
             async with session.get(url) as resp:
                 data = await resp.json()
+                print(f"Ответ баланса: {data}")
+                result["debug"] += f"Баланс API: {len(data.get('data', []))} аккаунтов\n"
+
                 if not data.get("data"):
                     result["txs"].append("Кошелёк не найден")
                     return result
 
                 acc = data["data"][0]
                 result["trx"] = acc.get("balance", 0) / 1e6
+                print(f"TRX: {result['trx']}")
 
                 # === USDT ===
-                for token in acc.get("trc20", []):
-                    if USDT_CONTRACT in token:
-                        result["usdt"] = int(token[USDT_CONTRACT]) / 1e6
-                        break  # Нашли — выходим
+                trc20 = acc.get("trc20", [])
+                print(f"TRC20 токены: {trc20}")
+                result["debug"] += f"TRC20 найдено: {len(trc20)}\n"
 
-            # === 2. ТРАНЗАКЦИИ ===
-            # USDT
+                for token in trc20:
+                    if isinstance(token, dict) and USDT_CONTRACT in token:
+                        raw = token[USDT_CONTRACT]
+                        result["usdt"] = int(raw) / 1e6
+                        print(f"USDT найден: {raw} → {result['usdt']}")
+                        result["debug"] += f"USDT: {result['usdt']}\n"
+                        break
+                else:
+                    result["debug"] += "USDT не найден в TRC20\n"
+
+            # === 2. USDT ТРАНЗАКЦИИ ===
             url_usdt = f"https://api.trongrid.io/v1/accounts/{address}/transactions/trc20?limit=3&contract_address={USDT_CONTRACT}"
+            print(f"Запрос USDT tx: {url_usdt}")
             async with session.get(url_usdt) as resp:
                 txs = await resp.json()
+                print(f"USDT транзакции: {txs}")
                 for tx in txs.get("data", []):
                     value = int(tx["value"]) / 1e6
                     to = tx["to"][:8] + "..." + tx["to"][-4:]
                     time = datetime.fromtimestamp(tx["block_timestamp"]/1000).strftime("%d.%m %H:%M")
-                    result["txs"].append(f"<b>USDT</b> → {to}\n<code>{value:.6f}</code> | {time}")
+                    result["txs"].append(f"<b>USDT</b> → {to}\n<code>{value:.2f}</code> | {time}")
 
-            # TRX (только если нет USDT)
-            if not result["txs"]:
-                url_trx = f"https://api.trongrid.io/v1/accounts/{address}/transactions?limit=3"
-                async with session.get(url_trx) as resp:
-                    txs = await resp.json()
-                    for tx in txs.get("data", []):
-                        raw = tx.get("raw_data", {}).get("payment", [{}])[0].get("parameter", {}).get("value", {})
-                        if raw.get("amount"):
-                            value = int(raw["amount"]) / 1e6
-                            to = raw.get("to_address", "")[:8] + "..." + raw.get("to_address", "")[-4:]
-                            time = datetime.fromtimestamp(tx["block_timestamp"]/1000).strftime("%d.%m %H:%M")
-                            result["txs"].append(f"<b>TRX</b> → {to}\n<code>{value:.2f}</code> | {time}")
-
-            result["txs"] = result["txs"][:3]
             result["total_usd"] = result["trx"] * TRX_PRICE + result["usdt"]
 
     except Exception as e:
-        print(f"API error: {e}")
+        error = f"API ОШИБКА: {type(e).__name__}: {e}"
+        print(error)
         result["txs"].append("Ошибка API")
+        result["debug"] += error
 
     return result
 
@@ -121,7 +127,7 @@ async def check_wallet(address: str) -> dict:
 async def ai_analyze(data: dict) -> str:
     prompt = (
         f"TRX: {data['trx']:.2f}, USDT: {data['usdt']:.2f}, "
-        f"Всего: ${data['total_usd']:.2f}, Транзакций: {len(data['txs'])}\n"
+        f"Всего: ${data['total_usd']:.2f}\n"
         "Это скам? Кратко: СКАМ / НОРМ / РИСК + причина."
     )
     try:
@@ -131,8 +137,8 @@ async def ai_analyze(data: dict) -> str:
             max_tokens=120
         )
         return response.choices[0].message.content.strip()
-    except:
-        return "ИИ: ошибка"
+    except Exception as e:
+        return f"ИИ: ошибка ({e})"
 
 # ==========================
 # Команды
@@ -140,10 +146,10 @@ async def ai_analyze(data: dict) -> str:
 @dp.message(Command("start"))
 async def start(msg: Message):
     await msg.answer(
-        "<b>CryptoDoni v16</b>\n\n"
-        "Пришли <b>TRON-адрес</b> — получишь:\n"
-        "• Баланс TRX + USDT\n"
-        "• Сумму в $\n"
+        "<b>CryptoDoni v18</b>\n\n"
+        "Пришли <b>TRON-адрес</b> → получишь:\n"
+        "• TRX и <b>USDT</b>\n"
+        "• Сумму в <b>$</b>\n"
         "• Транзакции\n"
         "• ИИ-анализ\n\n"
         "<i>Пример: TDqhrxGnktwBCim5ZXcJPvMWASSfYWsdt6</i>",
@@ -152,7 +158,7 @@ async def start(msg: Message):
 
 @dp.message()
 async def handle(msg: Message):
-    address = msg.text.strip() if msg.text else ""
+    address = msg.text.strip()
     if not (address.startswith("T") and len(address) == 34):
         await msg.answer("Неверный адрес!\nПример: <code>TDqhrxGnktwBCim5ZXcJPvMWASSfYWsdt6</code>", parse_mode=ParseMode.HTML)
         return
@@ -178,13 +184,17 @@ async def handle(msg: Message):
         f"<b>ИИ-анализ:</b>\n{await ai_analyze(data)}"
     )
 
+    # ДЕБАГ В ОТВЕТ (временно!)
+    if data["usdt"] == 0:
+        text += f"\n\n<b>DEBUG:</b>\n<pre>{data['debug']}</pre>"
+
     await msg.answer(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 # ==========================
 # Запуск
 # ==========================
 async def main():
-    print("CryptoDoni v16 запущен!")
+    print("CryptoDoni v18 запущен!")
     asyncio.create_task(start_web_server())
     await dp.start_polling(bot, polling_timeout=30)
 
