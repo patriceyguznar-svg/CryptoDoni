@@ -1,0 +1,16 @@
+name: Keep CryptoDoni Alive
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          git config --global user.name "CryptoDoni"
+          git commit --allow-empty -m "keep-alive: trigger deploy [skip ci]"
+          git push
