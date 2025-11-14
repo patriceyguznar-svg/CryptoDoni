@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CryptoDoni v4 — Всё в $ + USDT всегда
+CryptoDoni v5 — USDT + $ + всё работает!
 """
 
 import os
@@ -37,7 +37,7 @@ PRICES = {"TRX": 0.15, "USDT": 1.0}
 # Веб-сервер
 # ==========================
 async def handle(request):
-    return web.Response(text="CryptoDoni v4 alive")
+    return web.Response(text="CryptoDoni v5 alive")
 
 async def start_web_server():
     app = web.Application()
@@ -60,7 +60,8 @@ async def update_prices():
             async with session.get(url) as resp:
                 data = await resp.json()
                 PRICES["TRX"] = data.get("tron", {}).get("usd", 0.15)
-    except:
+    except Exception as e:
+        print(f"Ошибка цен: {e}")
         PRICES["TRX"] = 0.15
 
 # ==========================
@@ -80,11 +81,14 @@ async def check_wallet(address: str) -> dict:
     await update_prices()
 
     if address.startswith("0x") and len(address) == 42:
-        result.update(await check_bep20(address))
-    elif address.startswith("T") and len(address) == --34:
-        result.update(await check_tron(address))
+        data = await check_bep20(address)
+        result.update(data)
+    elif address.startswith("T") and len(address) == 34:
+        data = await check_tron(address)
+        result.update(data)
     elif len(address) > 50:
-        result.update(await check_solana(address))
+        data = await check_solana(address)
+        result.update(data)
 
     # --- СЧИТАЕМ USD ---
     total = 0.0
@@ -94,6 +98,8 @@ async def check_wallet(address: str) -> dict:
         usd = result["trx_amount"] * PRICES["TRX"]
         total += usd
         result["balances"].append(f"TRX: {result['trx_amount']:.2f} (~${usd:.2f})")
+    else:
+        result["balances"].append("TRX: 0.00 (~$0.00)")
 
     # USDT
     if result["usdt_amount"] > 0:
@@ -112,7 +118,7 @@ async def check_bep20(address: str) -> dict:
     trx_amount = usdt_amount = 0.0
     txs = []
     async with aiohttp.ClientSession() as session:
-        # BNB (не TRX, но оставим как пример)
+        # BNB
         url = f"https://api.bscscan.com/api?module=account&action=balance&address={address}"
         async with session.get(url) as resp:
             data = await resp.json()
@@ -129,17 +135,6 @@ async def check_bep20(address: str) -> dict:
             if data.get("status") == "1":
                 usdt_amount = int(data["result"]) / 1e18
 
-        # Транзакции
-        url = f"https://api.bscscan.com/api?module=account&action=txlist&address={address}&sort=desc&offset=5"
-        async with session.get(url) as resp:
-            data = await resp.json()
-            if data.get("status") == "1":
-                for tx in data["result"][:3]:
-                    value = int(tx["value"]) / 1e18
-                    to = tx["to"][:10] + "..." if tx["to"] else "contract"
-                    time = datetime.fromtimestamp(int(tx["timeStamp"])).strftime('%d.%m %H:%M')
-                    txs.append(f"→ {to} | {value:.6f} BNB | {time}")
-
     return {"network": "BEP20", "trx_amount": 0, "usdt_amount": usdt_amount, "txs": txs}
 
 # === TRON ===
@@ -154,12 +149,13 @@ async def check_tron(address: str) -> dict:
                 acc = data["data"][0]
                 trx_amount = acc.get("balance", 0) / 1e6
 
-                # USDT
+                # USDT TRC20
                 usdt_contract = "TR7NHqjeKQxGTCuuP8qACi7c3eN6T5z"
                 for token in acc.get("trc20", []):
                     contract = list(token.keys())[0]
                     if contract == usdt_contract:
                         usdt_amount = int(list(token.values())[0]) / 1e6
+                        break  # Нашли — выходим
 
                 # USDT транзакции
                 url = f"https://api.trongrid.io/v1/accounts/{address}/transactions/trc20?limit=3&contract_address={usdt_contract}"
@@ -195,8 +191,7 @@ async def ai_analyze(data: dict) -> str:
 Сеть: {data['network']}
 TRX: {data['trx_amount']:.2f}, USDT: {data['usdt_amount']:.2f}
 Общая сумма: ~${data['total_usd']:.2f}
-Транзакции:
-{chr(10).join(data['txs']) if data['txs'] else 'нет'}
+Транзакции: {len(data['txs'])} шт.
 
 Это скам? Кратко: СКАМ / НОРМ / РИСК + 1 предложение.
 """
@@ -216,7 +211,7 @@ TRX: {data['trx_amount']:.2f}, USDT: {data['usdt_amount']:.2f}
 @dp.message(Command("start"))
 async def start(msg: Message):
     await msg.answer(
-        "<b>CryptoDoni v4 — всё в $!</b>\n\n"
+        "<b>CryptoDoni v5 — USDT + $!</b>\n\n"
         "Пришли адрес:\n"
         "• <code>0x...</code> — BEP20\n"
         "• <code>T...</code> — TRON\n"
@@ -256,7 +251,7 @@ async def handle_address(msg: Message):
 # Graceful Shutdown
 # ==========================
 async def shutdown():
-    print("Остановка CryptoDoni v4...")
+    print("Остановка CryptoDoni v5...")
     await bot.session.close()
     sys.exit(0)
 
@@ -264,7 +259,7 @@ async def shutdown():
 # Запуск
 # ==========================
 async def main():
-    print("CryptoDoni v4 запущен!")
+    print("CryptoDoni v5 запущен!")
     asyncio.create_task(start_web_server())
 
     loop = asyncio.get_event_loop()
