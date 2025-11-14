@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CryptoDoni v26 — USDT + TRX + БЕЗ KeyError
+CryptoDoni v27 — USDT + TRX + БЕЗ ОШИБОК
 """
 
 import os
@@ -32,14 +32,17 @@ dp = Dispatcher()
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 TRX_PRICE = 0.15
-USDT_CONTRACT = "TR7NHqjeKQxGTCuuP8qACi...
+# ПОЛНЫЙ КОНТРАКТ USDT
+USDT_CONTRACT = "TR7NHqjeKQxGTCuuP8qACi7c3eN6T5z"
+
+# ПРАВИЛЬНЫЙ ЗАГОЛОВОК
 HEADERS = {"apikey": TRONSCAN_API_KEY}
 
 # ==========================
 # Веб-сервер
 # ==========================
 async def handle(request):
-    return web.Response(text="CryptoDoni v26 — Fixed amount_str")
+    return web.Response(text="CryptoDoni v27 — Fixed Syntax")
 
 async def start_web_server():
     app = web.Application()
@@ -73,9 +76,9 @@ async def check_wallet(address: str) -> dict:
                 print(f"API Баланс: {data}")
 
                 result["trx"] = data.get("balance", 0) / 1e6
-                result["debug"] += f"Баланс: {data.get('balance', 0)}\n"
+                result["debug"] += f"TRX: {result['trx']}\n"
 
-                # TRC20
+                # TRC20 — USDT
                 for token in data.get("trc20token_balances", []):
                     if token.get("tokenId") == USDT_CONTRACT:
                         raw = token.get("balance", "0")
@@ -86,24 +89,23 @@ async def check_wallet(address: str) -> dict:
                 else:
                     result["debug"] += "USDT не найден\n"
 
-            # === 2. ТРАНЗАКЦИИ (TRX + TRC20) ===
+            # === 2. ТРАНЗАКЦИИ ===
             url_tx = f"https://apilist.tronscanapi.com/api/transaction?limit=5&address={address}&sort=-timestamp"
             async with session.get(url_tx) as resp:
                 txs = await resp.json()
-                result["debug"] += f"USDT tx: {len(txs.get('data', []))} найдено\n"
+                result["debug"] += f"Транзакций: {len(txs.get('data', []))}\n"
 
                 for tx in txs.get("data", []):
-                    contract_type = tx.get("contractType")
-                    if contract_type == 1:  # TRX
+                    ctype = tx.get("contractType")
+                    if ctype == 1:  # TRX
                         value = int(tx.get("amount", 0)) / 1e6
                         to = tx.get("toAddress", "")[:8] + "..." + tx.get("toAddress", "")[-4:]
                         time = datetime.fromtimestamp(tx["timestamp"]/1000).strftime("%d.%m %H:%M")
                         result["txs"].append(f"<b>TRX</b> → {to}\n<code>{value:.2f}</code> | {time}")
 
-                    elif contract_type == 31:  # TRC20
+                    elif ctype == 31:  # TRC20
                         token_id = tx.get("tokenInfo", {}).get("tokenId")
                         if token_id == USDT_CONTRACT:
-                            # ИСПРАВЛЕНО: используем .get() вместо прямого доступа
                             amount_str = tx.get("amount_str", "0")
                             value = int(amount_str) / 1e6
                             to = tx.get("toAddress", "")[:8] + "..." + tx.get("toAddress", "")[-4:]
@@ -146,7 +148,7 @@ async def ai_analyze(data: dict) -> str:
 @dp.message(Command("start"))
 async def start(msg: Message):
     await msg.answer(
-        "<b>CryptoDoni v26</b>\n\n"
+        "<b>CryptoDoni v27</b>\n\n"
         "Пришли <b>TRON-адрес</b> → получишь:\n"
         "• TRX и <b>USDT</b>\n"
         "• Сумму в <b>$</b>\n"
@@ -194,7 +196,7 @@ async def handle(msg: Message):
 # Запуск
 # ==========================
 async def main():
-    print("CryptoDoni v26 запущен!")
+    print("CryptoDoni v27 запущен!")
     asyncio.create_task(start_web_server())
     await dp.start_polling(bot, polling_timeout=30)
 
