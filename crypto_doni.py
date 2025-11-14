@@ -87,7 +87,7 @@ async def check_bep20(address: str) -> dict:
                 if usdt > 0:
                     balances.append(f"USDT: {usdt:.2f}")
 
-        # Транзакции (включая USDT)
+        # Транзакции BNB
         url = f"https://api.bscscan.com/api?module=account&action=txlist&address={address}&sort=desc&offset=5"
         async with session.get(url) as resp:
             data = await resp.json()
@@ -98,7 +98,7 @@ async def check_bep20(address: str) -> dict:
                     time = datetime.fromtimestamp(int(tx["timeStamp"])).strftime('%d.%m %H:%M')
                     txs.append(f"→ {to} | {value:.6f} BNB | {time}")
 
-        # USDT транзакции
+        # Транзакции USDT
         url = f"https://api.bscscan.com/api?module=account&action=tokentx&contractaddress={usdt_contract}&address={address}&sort=desc&offset=3"
         async with session.get(url) as resp:
             data = await resp.json()
@@ -134,7 +134,7 @@ async def check_tron(address: str) -> dict:
                         if usdt > 0:
                             balances.append(f"USDT: {usdt:.2f}")
 
-                # Транзакции
+                # TRC20 USDT транзакции
                 url = f"https://api.trongrid.io/v1/accounts/{address}/transactions/trc20?limit=3&contract_address={usdt_contract}"
                 async with session.get(url) as resp:
                     data = await resp.json()
@@ -213,10 +213,10 @@ async def handle_address(msg: Message):
         await msg.answer("Неверный адрес.")
         return
 
-    await msg.answer("Проверяю... ⏳")
+    await msg.answer("Проверяю... (hourglass)")
     try:
         result = await check_wallet(address)
-        tx_text = "\n".join(result mums['txs']) if result['txs'] else "нет"
+        tx_text = "\n".join(result['txs']) if result['txs'] else "нет"
         text = f"""
 <b>Кошелёк:</b> <code>{result['address']}</code>
 <b>Сеть:</b> {result['network']}
