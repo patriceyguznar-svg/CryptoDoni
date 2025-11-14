@@ -1,5 +1,3 @@
 aiogram==3.13.1
 aiohttp
 openai
-selenium==4.15.2
-webdriver-manager
