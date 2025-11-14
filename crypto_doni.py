@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CryptoDoni v30 — FIXED USDT BALANCE + amountStr + STABLE TRONSCAN API
+CryptoDoni v31 — точный USDT и TRX, без исправлений
 """
 
 import os
@@ -24,7 +24,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TRONSCAN_API_KEY = os.getenv("TRONSCAN_API_KEY")
 
 if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, TRONSCAN_API_KEY]):
-    print("ОШИБКА: Проверь переменные окружения!")
+    print("ОШИБКА: проверь переменные окружения!")
     exit(1)
 
 bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -44,7 +44,7 @@ HEADERS = {
 # KEEP-ALIVE WEB
 # ==========================
 async def handle(request):
-    return web.Response(text="CryptoDoni v30 — Running!")
+    return web.Response(text="CryptoDoni v31 — Running!")
 
 async def start_web_server():
     app = web.Application()
@@ -71,73 +71,47 @@ async def check_wallet(address: str) -> dict:
     try:
         async with aiohttp.ClientSession(headers=HEADERS) as session:
 
-            # === 1. TRX баланс ===
+            # === TRX баланс ===
             url_acc = f"https://apilist.tronscanapi.com/api/account?address={address}"
-            async with session.get(url_acc, timeout=5) as resp:
-                if resp.status != 200:
-                    result["debug"] += f"ERR account status {resp.status}\n"
+            async with session.get(url_acc, timeout=10) as resp:
+                acc = await resp.json()
+                result["trx"] = acc.get("balance", 0) / 1e6
+                result["debug"] += f"TRX: {result['trx']}\n"
+
+            # === USDT баланс (фактический) ===
+            url_tokens = f"https://apilist.tronscanapi.com/api/account/tokens?address={address}&start=0&limit=200"
+            async with session.get(url_tokens, timeout=10) as resp:
+                tok = await resp.json()
+                for t in tok.get("data", []):
+                    if t.get("tokenId") == USDT_CONTRACT:
+                        raw = t.get("balance", "0")
+                        result["usdt"] = int(raw) / 1e6
+                        result["debug"] += f"USDT: {raw} → {result['usdt']}\n"
+                        break
                 else:
-                    acc = await resp.json()
-                    result["trx"] = acc.get("balance", 0) / 1e6
-                    result["debug"] += f"TRX: {result['trx']:.6f}\n"
+                    result["debug"] += "USDT not found\n"
 
-            # === 2. USDT через fallback ===
-            urls_tokens = [
-                f"https://apilist.tronscanapi.com/api/account/tokens?address={address}&start=0&limit=200",
-                f"https://apilist.tronscanapi.com/api/accountv2?address={address}"
-            ]
-            for url in urls_tokens:
-                try:
-                    async with session.get(url, timeout=5) as resp:
-                        if resp.status != 200:
-                            result["debug"] += f"ERR tokens status {resp.status}\n"
-                            continue
-                        tok = await resp.json()
-                        # fallback 1: trc20token_balances
-                        for t in tok.get("data", []) if "data" in tok else tok.get("trc20token_balances", []):
-                            if t.get("tokenId") == USDT_CONTRACT or t.get("tokenAbbr","").lower()=="usdt":
-                                raw = t.get("balance") or t.get("amount") or t.get("amountStr") or "0"
-                                result["usdt"] = int(raw)/1e6
-                                result["debug"] += f"USDT OK: {raw} → {result['usdt']:.6f}\n"
-                                break
-                        if result["usdt"] > 0:
-                            break
-                except Exception as e:
-                    result["debug"] += f"USDT error: {e}\n"
-
-            if result["usdt"] == 0:
-                result["debug"] += "USDT not found in any token list\n"
-                # === 3. Последние транзакции ===
+            # === Транзакции ===
             url_tx = f"https://apilist.tronscanapi.com/api/transaction?limit=5&address={address}&sort=-timestamp"
-            async with session.get(url_tx, timeout=5) as resp:
-                if resp.status != 200:
-                    result["debug"] += f"ERR tx status {resp.status}\n"
-                else:
-                    txs = await resp.json()
-                    data = txs.get("data", [])
-                    result["debug"] += f"TX count: {len(data)}\n"
+            async with session.get(url_tx, timeout=10) as resp:
+                txs = await resp.json()
+                data = txs.get("data", [])
+                for tx in data:
+                    ctype = tx.get("contractType")
+                    time = datetime.fromtimestamp(tx["timestamp"]/1000).strftime("%d.%m %H:%M")
+                    to = tx.get("toAddress", "")
+                    to_short = to[:8] + "..." + to[-4:]
 
-                    for tx in data:
-                        ctype = tx.get("contractType")
-                        time = datetime.fromtimestamp(tx["timestamp"]/1000).strftime("%d.%m %H:%M")
-
-                        # TRX transfer
-                        if ctype == 1:
-                            value = int(tx.get("amount",0))/1e6
-                            to = tx.get("toAddress","")[:8]+"..."+tx.get("toAddress","")[-4:]
-                            result["txs"].append(f"<b>TRX</b> → {to}\n<code>{value:.2f}</code> | {time}")
-
-                        # USDT (TRC20)
-                        elif ctype == 31:
-                            token_info = tx.get("tokenInfo",{})
-                            if token_info.get("tokenId")==USDT_CONTRACT:
-                                raw = tx.get("amountStr","0")
-                                value = int(raw)/1e6
-                                to = tx.get("toAddress","")[:8]+"..."+tx.get("toAddress","")[-4:]
-                                result["txs"].append(f"<b>USDT</b> → {to}\n<code>{value:.2f}</code> | {time}")
-
-            # Итоговая сумма
-            result["total_usd"] = result["trx"]*TRX_PRICE + result["usdt"]
+                    if ctype == 1:
+                        value = int(tx.get("amount", 0)) / 1e6
+                        result["txs"].append(f"<b>TRX</b> → {to_short}\n<code>{value}</code> | {time}")
+                    elif ctype == 31:
+                        token_info = tx.get("tokenInfo", {})
+                        if token_info.get("tokenId") == USDT_CONTRACT:
+                            raw = tx.get("amountStr", "0")
+                            value = int(raw) / 1e6
+                            result["txs"].append(f"<b>USDT</b> → {to_short}\n<code>{value}</code> | {time}")
+                            result["total_usd"] = result["trx"] * TRX_PRICE + result["usdt"]
 
     except Exception as e:
         result["debug"] += f"GLOBAL ERROR: {e}\n"
@@ -150,14 +124,14 @@ async def check_wallet(address: str) -> dict:
 # ==========================
 async def ai_analyze(data: dict) -> str:
     prompt = (
-        f"TRX: {data['trx']:.2f}, USDT: {data['usdt']:.2f}, "
-        f"Всего: ${data['total_usd']:.2f}, Транзакций: {len(data['txs'])}\n"
-        "Это скам? Ответь коротко: СКАМ / НОРМ / РИСК + причина."
+        f"TRX: {data['trx']}, USDT: {data['usdt']}, "
+        f"Всего: ${data['total_usd']}, Транзакций: {len(data['txs'])}\n"
+        "Это скам? Коротко: СКАМ / НОРМ / РИСК + причина."
     )
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role":"user","content":prompt}],
+            messages=[{"role": "user", "content": prompt}],
             max_tokens=120
         )
         return response.choices[0].message.content.strip()
@@ -170,11 +144,11 @@ async def ai_analyze(data: dict) -> str:
 @dp.message(Command("start"))
 async def start(msg: Message):
     await msg.answer(
-        "<b>CryptoDoni v30</b>\n\n"
-        "Пришли <b>TRON-адрес</b>:\n"
-        "• TRX и USDT\n"
+        "<b>CryptoDoni v31</b>\n\n"
+        "Пришли TRON-адрес:\n"
+        "• TRX и USDT (фактические)\n"
         "• USD сумма\n"
-        "• Транзакции\n"
+        "• Последние транзакции\n"
         "• ИИ-анализ\n\n"
         "<i>Пример: TDqhrxGnktwBCim5ZXcJPvMWASSfYWsdt6</i>"
     )
@@ -182,16 +156,16 @@ async def start(msg: Message):
 @dp.message()
 async def handle_wallet(msg: Message):
     address = msg.text.strip()
-    if not (address.startswith("T") and len(address)==34):
+    if not (address.startswith("T") and len(address) == 34):
         await msg.answer("Неверный адрес!\nПример: <code>TDqhrxGnktwBCim5ZXcJPvMWASSfYWsdt6</code>")
         return
 
     await msg.answer("Проверяю...")
 
     data = await check_wallet(address)
-    short = address[:8]+"..."+address[-6:]
+    short = address[:8] + "..." + address[-6:]
 
-    trx_usd = data["trx"]*TRX_PRICE
+    trx_usd = data["trx"] * TRX_PRICE
     usdt_usd = data["usdt"]
 
     txs_text = "\n\n".join(data["txs"]) if data["txs"] else "—"
@@ -200,22 +174,23 @@ async def handle_wallet(msg: Message):
         f"<b>Кошелёк:</b> <code>{short}</code>\n"
         f"<b>Сеть:</b> TRON\n\n"
         f"<b>Баланс:</b>\n"
-        f"• TRX: <b>{data['trx']:.2f}</b> (~${trx_usd:.2f})\n"
-        f"• USDT: <b>{data['usdt']:.2f}</b> (~${usdt_usd:.2f})\n\n"
-        f"<b>Итого: <u>${data['total_usd']:.2f}</u></b>\n\n"
+        f"• TRX: <b>{data['trx']}</b> (~${trx_usd})\n"
+        f"• USDT: <b>{data['usdt']}</b> (~${usdt_usd})\n\n"
+        f"<b>Итого: <u>${data['total_usd']}</u></b>\n\n"
         f"<b>Последние транзакции:</b>\n{txs_text}\n\n"
         f"<b>ИИ-анализ:</b>\n{await ai_analyze(data)}"
     )
 
-    if data["usdt"]==0:
-        text += f"\n\n<b>DEBUG:</b>\n<pre>{data['debug']}</pre>"
+    # DEBUG всегда можно выводить при проблемах
+    text += f"\n\n<b>DEBUG:</b>\n<pre>{data['debug']}</pre>"
 
     await msg.answer(text, disable_web_page_preview=True)
-    # ==========================
+
+# ==========================
 # RUN
 # ==========================
 async def main():
-    print("CryptoDoni v30 запущен!")
+    print("CryptoDoni v31 запущен!")
     asyncio.create_task(start_web_server())
     await dp.start_polling(bot, polling_timeout=30)
 
