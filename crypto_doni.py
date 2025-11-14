@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CryptoDoni v21 — TRONSCAN API + USDT + КРАСИВО
+CryptoDoni v24 — TRONSCAN API + USDT + TRX + ТРАНЗАКЦИИ
 """
 
 import os
@@ -21,7 +21,7 @@ from aiohttp import web
 # ==========================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-TRONSCAN_API_KEY = os.getenv("TRONSCAN_API_KEY")  # ТВОЙ КЛЮЧ!
+TRONSCAN_API_KEY = os.getenv("TRONSCAN_API_KEY")
 
 if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, TRONSCAN_API_KEY]):
     print("ОШИБКА: Проверь переменные в Render!")
@@ -34,14 +34,14 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 TRX_PRICE = 0.15
 USDT_CONTRACT = "TR7NHqjeKQxGTCuuP8qACi7c3eN6T5z"
 
-# Заголовки для TronScan API
-HEADERS = {"TRON-PRO-API-KEY": TRONSCAN_API_KEY}
+# ПРАВИЛЬНЫЙ ЗАГОЛОВОК ДЛЯ TRONSCAN
+HEADERS = {"apikey": TRONSCAN_API_KEY}
 
 # ==========================
 # Веб-сервер (для Render)
 # ==========================
 async def handle(request):
-    return web.Response(text="CryptoDoni v21 — TronScan API")
+    return web.Response(text="CryptoDoni v24 — TronScan API")
 
 async def start_web_server():
     app = web.Application()
@@ -51,10 +51,10 @@ async def start_web_server():
     port = int(os.getenv("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"Веб-сервер на порту {port}")
+    print(f"Веб-сервер запущен на порту {port}")
 
 # ==========================
-# Проверка кошелька (TronScan API)
+# Проверка кошелька
 # ==========================
 async def check_wallet(address: str) -> dict:
     result = {
@@ -62,30 +62,35 @@ async def check_wallet(address: str) -> dict:
         "trx": 0.0,
         "usdt": 0.0,
         "total_usd": 0.0,
-        "txs": []
+        "txs": [],
+        "debug": ""
     }
 
     try:
         async with aiohttp.ClientSession(headers=HEADERS) as session:
-            # === 1. БАЛАНС TRX + USDT ===
-            url = f"https://apilist.tronscan.org/api/account?address={address}"
-            async with session.get(url) as resp:
+            # === 1. БАЛАНС TRX + TRC20 ===
+            url_balance = f"https://apilist.tronscanapi.com/api/account?address={address}"
+            async with session.get(url_balance) as resp:
                 data = await resp.json()
-                print(f"TronScan баланс: {data}")
+                result["debug"] += f"Баланс: {data.get('balance', 0)}\n"
 
                 result["trx"] = data.get("balance", 0) / 1e6
 
                 # USDT
                 for token in data.get("trc20token_balances", []):
                     if token.get("tokenId") == USDT_CONTRACT:
-                        result["usdt"] = int(token.get("balance", 0)) / 1e6
-                        print(f"USDT найден: {result['usdt']}")
+                        raw = token.get("balance", "0")
+                        result["usdt"] = int(raw) / 1e6
+                        result["debug"] += f"USDT raw: {raw} → {result['usdt']}\n"
                         break
+                else:
+                    result["debug"] += "USDT не найден в TRC20\n"
 
             # === 2. ТРАНЗАКЦИИ USDT ===
-            url_tx = f"https://apilist.tronscan.org/api/transfer?limit=3&token={USDT_CONTRACT}&address={address}&direction=out"
-            async with session.get(url_tx) as resp:
+            url_usdt = f"https://apilist.tronscanapi.com/api/transfer?limit=3&token={USDT_CONTRACT}&address={address}"
+            async with session.get(url_usdt) as resp:
                 txs = await resp.json()
+                result["debug"] += f"USDT tx: {len(txs.get('data', []))} найдено\n"
                 for tx in txs.get("data", []):
                     value = int(tx["amount_str"]) / 1e6
                     to = tx["transferToAddress"][:8] + "..." + tx["transferToAddress"][-4:]
@@ -94,11 +99,11 @@ async def check_wallet(address: str) -> dict:
 
             # === 3. TRX ТРАНЗАКЦИИ (если нет USDT) ===
             if not result["txs"]:
-                url_trx = f"https://apilist.tronscan.org/api/transaction?limit=3&address={address}&sort=-timestamp"
+                url_trx = f"https://apilist.tronscanapi.com/api/transaction?limit=3&address={address}&sort=-timestamp"
                 async with session.get(url_trx) as resp:
                     txs = await resp.json()
                     for tx in txs.get("data", []):
-                        if tx.get("contractType") == 1:  # TRX transfer
+                        if tx.get("contractType") == 1:
                             value = int(tx["amount"]) / 1e6
                             to = tx["toAddress"][:8] + "..." + tx["toAddress"][-4:]
                             time = datetime.fromtimestamp(tx["timestamp"]/1000).strftime("%d.%m %H:%M")
@@ -107,13 +112,15 @@ async def check_wallet(address: str) -> dict:
             result["total_usd"] = result["trx"] * TRX_PRICE + result["usdt"]
 
     except Exception as e:
-        print(f"API error: {e}")
+        error = f"API error: {type(e).__name__}: {e}"
+        print(error)
         result["txs"].append("Ошибка API")
+        result["debug"] += error
 
     return result
 
 # ==========================
-# ИИ-анализ
+# ИИ
 # ==========================
 async def ai_analyze(data: dict) -> str:
     prompt = (
@@ -128,8 +135,8 @@ async def ai_analyze(data: dict) -> str:
             max_tokens=120
         )
         return response.choices[0].message.content.strip()
-    except:
-        return "ИИ: ошибка"
+    except Exception as e:
+        return f"ИИ: ошибка ({e})"
 
 # ==========================
 # Команды
@@ -137,8 +144,8 @@ async def ai_analyze(data: dict) -> str:
 @dp.message(Command("start"))
 async def start(msg: Message):
     await msg.answer(
-        "<b>CryptoDoni v21</b>\n\n"
-        "Пришли <b>TRON-адрес</b> — получишь:\n"
+        "<b>CryptoDoni v24</b>\n\n"
+        "Пришли <b>TRON-адрес</b> → получишь:\n"
         "• TRX и <b>USDT</b>\n"
         "• Сумму в <b>$</b>\n"
         "• Транзакции\n"
@@ -175,13 +182,17 @@ async def handle(msg: Message):
         f"<b>ИИ-анализ:</b>\n{await ai_analyze(data)}"
     )
 
+    # ДЕБАГ ТОЛЬКО ПРИ USDT = 0
+    if data["usdt"] == 0:
+        text += f"\n\n<b>DEBUG:</b>\n<pre>{data['debug']}</pre>"
+
     await msg.answer(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 # ==========================
 # Запуск
 # ==========================
 async def main():
-    print("CryptoDoni v21 запущен!")
+    print("CryptoDoni v24 запущен!")
     asyncio.create_task(start_web_server())
     await dp.start_polling(bot, polling_timeout=30)
 
