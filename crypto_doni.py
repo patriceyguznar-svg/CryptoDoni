@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CryptoDoni v9 — TronScan Scraper (Render-ready)
+CryptoDoni v12 — TRONGRID API (с ключом)
 """
 
 import os
 import asyncio
+import aiohttp
 import signal
 import sys
 from datetime import datetime
@@ -16,32 +17,32 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from openai import OpenAI
 from aiohttp import web
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.chrome.service import Service
 
 # ==========================
-# Конфиг
+# КОНФИГ
 # ==========================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
-    print("ОШИБКА: Укажи TELEGRAM_TOKEN и OPENAI_API_KEY!")
+TRONGRID_API_KEY = os.getenv("TRONGRID_API_KEY")  # ТВОЙ КЛЮЧ!
+
+if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, TRONGRID_API_KEY]):
+    print("ОШИБКА: Укажи TELEGRAM_TOKEN, OPENAI_API_KEY, TRONGRID_API_KEY в Render!")
     sys.exit(1)
 
 bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+TRX_PRICE = 0.15  # USD
+
+# Заголовки с ключом
+HEADERS = {"TRON-PRO-API-KEY": TRONGRID_API_KEY}
+
 # ==========================
 # Веб-сервер
 # ==========================
 async def handle(request):
-    return web.Response(text="CryptoDoni v9 — TronScan scraper alive")
+    return web.Response(text="CryptoDoni v12 — TRONGRID API")
 
 async def start_web_server():
     app = web.Application()
@@ -54,82 +55,75 @@ async def start_web_server():
     print(f"Веб-сервер на порту {port}")
 
 # ==========================
-# Парсинг TronScan
+# Проверка кошелька
 # ==========================
-def scrape_tronscan(address: str) -> dict:
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+async def check_wallet(address: str) -> dict:
+    result = {
+        "address": address,
+        "network": "TRON",
+        "trx_amount": 0.0,
+        "usdt_amount": 0.0,
+        "total_usd": 0.0,
+        "txs": []
+    }
 
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
     try:
-        print(f"Открываю https://tronscan.org/#/address/{address}")
-        driver.get(f"https://tronscan.org/#/address/{address}")
-        wait = WebDriverWait(driver, 15)
+        async with aiohttp.ClientSession(headers=HEADERS) as session:
+            # 1. Баланс TRX + USDT
+            url = f"https://api.trongrid.io/v1/accounts/{address}"
+            async with session.get(url) as resp:
+                data = await resp.json()
+                if data.get("data"):
+                    acc = data["data"][0]
+                    result["trx_amount"] = acc.get("balance", 0) / 1e6
 
-        # Ждём загрузки баланса
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.account-balance")))
+                    # USDT TRC20
+                    usdt_contract = "TR7NHqjeKQxGTCuuP8qACi7c3eN6T5z"
+                    for token in acc.get("trc20", []):
+                        if list(token.keys())[0] == usdt_contract:
+                            result["usdt_amount"] = int(list(token.values())[0]) / 1e6
+                            break
 
-        # TRX
-        trx_elem = driver.find_element(By.XPATH, "//span[contains(text(), 'TRX')]/preceding-sibling::span")
-        trx_text = trx_elem.text.replace(",", "")
-        trx_amount = float(trx_text) if trx_text.replace(".", "").isdigit() else 0.0
+            # 2. Транзакции (USDT + TRX)
+            # USDT
+            url_tx = f"https://api.trongrid.io/v1/accounts/{address}/transactions/trc20?limit=3&contract_address={usdt_contract}"
+            async with session.get(url_tx) as resp:
+                tx_data = await resp.json()
+                for tx in tx_data.get("data", []):
+                    value = int(tx["value"]) / 1e6
+                    to = tx["to"][:10] + "..."
+                    time = datetime.fromtimestamp(tx["block_timestamp"]/1000).strftime("%d.%m %H:%M")
+                    result["txs"].append(f"→ {to} | {value:.2f} USDT | {time}")
 
-        # USDT (ищем в токенах)
-        usdt_amount = 0.0
-        try:
-            usdt_elem = driver.find_element(By.XPATH, "//div[contains(text(), 'USDT')]/following-sibling::div//span")
-            usdt_text = usdt_elem.text.replace(",", "")
-            usdt_amount = float(usdt_text) if usdt_text.replace(".", "").isdigit() else 0.0
-        except:
-            pass
+            # TRX
+            url_trx = f"https://api.trongrid.io/v1/accounts/{address}/transactions?limit=3"
+            async with session.get(url_trx) as resp:
+                trx_data = await resp.json()
+                for tx in trx_data.get("data", []):
+                    raw = tx.get("raw_data", {}).get("contract", [{}])[0].get("parameter", {}).get("value", {})
+                    if raw.get("amount"):
+                        value = int(raw["amount"]) / 1e6
+                        to = raw.get("to_address", "")[:10] + "..."
+                        time = datetime.fromtimestamp(tx["block_timestamp"]/1000).strftime("%d.%m %H:%M")
+                        result["txs"].append(f"→ {to} | {value:.2f} TRX | {time}")
 
-        # Транзакции (последние 3)
-        txs = []
-        try:
-            rows = driver.find_elements(By.CSS_SELECTOR, "table tr")[1:4]  # Пропускаем заголовок
-            for row in rows:
-                cols = row.find_elements(By.TAG_NAME, "td")
-                if len(cols) < 5: continue
-                to = cols[2].text[:10] + "..." if cols[2].text else "contract"
-                amount = cols[3].text
-                time_raw = cols[1].text.split(" ")[0]  # "14.11.2025" → "14.11"
-                time = time_raw[:5].replace(".", ".")
-                txs.append(f"→ {to} | {amount} | {time}")
-        except:
-            pass
+            result["txs"] = result["txs"][:3]
+            result["total_usd"] = result["trx_amount"] * TRX_PRICE + result["usdt_amount"]
 
-        # Цена TRX (примерная)
-        trx_price = 0.15
-        total_usd = trx_amount * trx_price + usdt_amount
-
-        return {
-            "network": "TRON",
-            "trx_amount": trx_amount,
-            "usdt_amount": usdt_amount,
-            "total_usd": total_usd,
-            "txs": txs
-        }
     except Exception as e:
-        print(f"Ошибка парсинга: {e}")
-        return {"network": "TRON", "trx_amount": 0, "usdt_amount": 0, "total_usd": 0, "txs": []}
-    finally:
-        driver.quit()
+        print(f"Ошибка TRONGRID: {e}")
+
+    return result
 
 # ==========================
-# ИИ-анализ
+# ИИ
 # ==========================
 async def ai_analyze(data: dict) -> str:
     prompt = (
-        f"Кошелёк: {data.get('address', '')[:10]}...\n"
+        f"Кошелёк: {data['address'][:10]}...\n"
         f"TRX: {data['trx_amount']:.2f}, USDT: {data['usdt_amount']:.2f}\n"
         f"Сумма: ${data['total_usd']:.2f}, транзакций: {len(data['txs'])}\n"
-        "Это скам? Кратко: СКАМ / НОРМ / РИСК + 1 предложение."
+        "Это скам? Кратко: СКАМ / НОРМ / РИСК + причина."
     )
     try:
         response = client.chat.completions.create(
@@ -138,7 +132,7 @@ async def ai_analyze(data: dict) -> str:
             max_tokens=100
         )
         return response.choices[0].message.content.strip()
-    except Exception as e:
+    except:
         return "ИИ: недоступен"
 
 # ==========================
@@ -147,52 +141,43 @@ async def ai_analyze(data: dict) -> str:
 @dp.message(Command("start"))
 async def start(msg: Message):
     await msg.answer(
-        "<b>CryptoDoni v9 — TronScan парсер!</b>\n\n"
-        "Пришли адрес TRON (T...): получишь всё в $!"
+        "<b>CryptoDoni v12 — TRONGRID API</b>\n\n"
+        "Пришли адрес TRON → получишь всё в $!"
     )
 
 @dp.message()
 async def handle(msg: Message):
-    address = msg.text.strip()
+    address = msg.text.strip() if msg.text else ""
     if not (address.startswith("T") and len(address) == 34):
         await msg.answer("Пришли валидный TRON-адрес (T...34 символа)!")
         return
 
-    await msg.answer("Парсю TronScan... (hourglass)")
+    await msg.answer("Проверяю... (hourglass)")
     try:
-        data = scrape_tronscan(address)
-        data["address"] = address  # Добавляем адрес
-
-        short_addr = address[:10] + "..."
-        trx_usd = data["trx_amount"] * 0.15
+        data = await check_wallet(address)
+        short = address[:10] + "..."
+        trx_usd = data["trx_amount"] * TRX_PRICE
         usdt_usd = data["usdt_amount"]
-        total = trx_usd + usdt_usd
 
-        balance_line = f"TRX: {data['trx_amount']:.2f} (~${trx_usd:.2f}) USDT: {data['usdt_amount']:.2f} (~${usdt_usd:.2f})"
-        tx_line = "\n".join(data['txs']) if data['txs'] else "нет"
+        balance = f"TRX: {data['trx_amount']:.2f} (~${trx_usd:.2f}) USDT: {data['usdt_amount']:.2f} (~${usdt_usd:.2f})"
+        txs = "\n".join(data["txs"]) if data["txs"] else "нет"
 
         text = (
-            f"<b>Кошелёк:</b> {short_addr} <b>Сеть:</b> {data['network']} <b>Баланс:</b> {balance_line}\n"
-            f"<b>Общая сумма: ~${total:.2f}</b>\n"
-            f"<b>Транзакции:</b> {tx_line}\n"
+            f"<b>Кошелёк:</b> {short} <b>Сеть:</b> TRON <b>Баланс:</b> {balance}\n"
+            f"<b>Общая сумма: ~${data['total_usd']:.2f}</b>\n"
+            f"<b>Транзакции:</b> {txs}\n"
             f"<b>ИИ:</b> {await ai_analyze(data)}"
         )
-
         await msg.answer(text, disable_web_page_preview=True)
     except Exception as e:
-        await msg.answer(f"Ошибка: {str(e)}")
+        await msg.answer(f"Ошибка: {e}")
 
 # ==========================
 # Запуск
 # ==========================
 async def main():
-    print("CryptoDoni v9 запущен!")
+    print("CryptoDoni v12 запущен!")
     asyncio.create_task(start_web_server())
-
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(bot.session.close()))
-
     await dp.start_polling(bot, polling_timeout=30)
 
 if __name__ == "__main__":
