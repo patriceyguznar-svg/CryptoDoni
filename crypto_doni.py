@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CryptoDoni v8 — TRONSCAN SCRAPER
-Парсит TronScan + ИИ-анализ
+CryptoDoni v9 — TronScan Scraper (Render-ready)
 """
 
 import os
@@ -22,6 +21,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.service import Service
 
 # ==========================
 # Конфиг
@@ -40,7 +41,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # Веб-сервер
 # ==========================
 async def handle(request):
-    return web.Response(text="CryptoDoni v8 — TronScan scraper alive")
+    return web.Response(text="CryptoDoni v9 — TronScan scraper alive")
 
 async def start_web_server():
     app = web.Application()
@@ -57,45 +58,55 @@ async def start_web_server():
 # ==========================
 def scrape_tronscan(address: str) -> dict:
     options = Options()
-    options.add_argument("--headless")  # Без GUI
+    options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
-    driver = webdriver.Chrome(options=options)
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=options)
     try:
+        print(f"Открываю https://tronscan.org/#/address/{address}")
         driver.get(f"https://tronscan.org/#/address/{address}")
-        wait = WebDriverWait(driver, 10)
+        wait = WebDriverWait(driver, 15)
 
-        # Баланс TRX
-        trx_elem = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "[data-testid='balance-trx']")))
-        trx_text = trx_elem.text.strip()
-        trx_amount = float(trx_text.split()[0]) if trx_text else 0.0
+        # Ждём загрузки баланса
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.account-balance")))
 
-        # USD TRX
-        usd_trx_elem = driver.find_element(By.CSS_SELECTOR, "[data-testid='balance-usd']")
-        usd_trx = float(usd_trx_elem.text.replace('$', '')) if usd_trx_elem.text else 0.0
+        # TRX
+        trx_elem = driver.find_element(By.XPATH, "//span[contains(text(), 'TRX')]/preceding-sibling::span")
+        trx_text = trx_elem.text.replace(",", "")
+        trx_amount = float(trx_text) if trx_text.replace(".", "").isdigit() else 0.0
 
-        # USDT
-        usdt_elem = driver.find_element(By.CSS_SELECTOR, "[data-testid='token-usdt']")
-        usdt_text = usdt_elem.text.strip()
-        usdt_amount = float(usdt_text.split()[0]) if usdt_text and 'USDT' in usdt_text else 0.0
+        # USDT (ищем в токенах)
+        usdt_amount = 0.0
+        try:
+            usdt_elem = driver.find_element(By.XPATH, "//div[contains(text(), 'USDT')]/following-sibling::div//span")
+            usdt_text = usdt_elem.text.replace(",", "")
+            usdt_amount = float(usdt_text) if usdt_text.replace(".", "").isdigit() else 0.0
+        except:
+            pass
 
-        # USD USDT
-        usd_usdt = usdt_amount * 1.0  # USDT = $1
-
-        # Транзакции (3 последние)
+        # Транзакции (последние 3)
         txs = []
-        tx_elements = driver.find_elements(By.CSS_SELECTOR, "[data-testid='transaction-row']")[:3]
-        for tx in tx_elements:
-            to = tx.find_element(By.CSS_SELECTOR, ".to-address").text[:10] + "..."
-            amount = tx.find_element(By.CSS_SELECTOR, ".amount").text
-            time_elem = tx.find_element(By.CSS_SELECTOR, ".time")
-            time = time_elem.text  # '14.11 12:15'
-            txs.append(f"→ {to} | {amount} | {time}")
+        try:
+            rows = driver.find_elements(By.CSS_SELECTOR, "table tr")[1:4]  # Пропускаем заголовок
+            for row in rows:
+                cols = row.find_elements(By.TAG_NAME, "td")
+                if len(cols) < 5: continue
+                to = cols[2].text[:10] + "..." if cols[2].text else "contract"
+                amount = cols[3].text
+                time_raw = cols[1].text.split(" ")[0]  # "14.11.2025" → "14.11"
+                time = time_raw[:5].replace(".", ".")
+                txs.append(f"→ {to} | {amount} | {time}")
+        except:
+            pass
 
-        total_usd = usd_trx + usd_usdt
+        # Цена TRX (примерная)
+        trx_price = 0.15
+        total_usd = trx_amount * trx_price + usdt_amount
 
         return {
             "network": "TRON",
@@ -114,7 +125,12 @@ def scrape_tronscan(address: str) -> dict:
 # ИИ-анализ
 # ==========================
 async def ai_analyze(data: dict) -> str:
-    prompt = f"Кошелёк: {data['address'][:10]}... TRX: {data['trx_amount']:.2f}, USDT: {data['usdt_amount']:.2f}, Сумма: ${data['total_usd']:.2f}, Транзакций: {len(data['txs'])}\nЭто скам? Кратко: СКАМ / НОРМ / РИСК + причина."
+    prompt = (
+        f"Кошелёк: {data.get('address', '')[:10]}...\n"
+        f"TRX: {data['trx_amount']:.2f}, USDT: {data['usdt_amount']:.2f}\n"
+        f"Сумма: ${data['total_usd']:.2f}, транзакций: {len(data['txs'])}\n"
+        "Это скам? Кратко: СКАМ / НОРМ / РИСК + 1 предложение."
+    )
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -131,51 +147,53 @@ async def ai_analyze(data: dict) -> str:
 @dp.message(Command("start"))
 async def start(msg: Message):
     await msg.answer(
-        "<b>CryptoDoni v8 — TronScan scraper!</b>\n\n"
-        "Пришли адрес TRON (T...): Покажу USDT, $, транзакции!"
+        "<b>CryptoDoni v9 — TronScan парсер!</b>\n\n"
+        "Пришли адрес TRON (T...): получишь всё в $!"
     )
 
 @dp.message()
 async def handle(msg: Message):
     address = msg.text.strip()
     if not (address.startswith("T") and len(address) == 34):
-        await msg.answer("Пришли TRON-адрес (T...34 символа)!")
+        await msg.answer("Пришли валидный TRON-адрес (T...34 символа)!")
         return
 
     await msg.answer("Парсю TronScan... (hourglass)")
     try:
         data = scrape_tronscan(address)
-        trx_usd = data["trx_amount"] * 0.15  # Примерная цена TRX
-        usdt_usd = data["usdt_amount"] * 1.0
+        data["address"] = address  # Добавляем адрес
 
         short_addr = address[:10] + "..."
-        balance_line = f"TRX: {data['trx_amount']:.2f} (~${trx_usd:.2f}) USDT: {data['usdt_amount']:.2f} (~${usdt_usd:.2f})"
+        trx_usd = data["trx_amount"] * 0.15
+        usdt_usd = data["usdt_amount"]
         total = trx_usd + usdt_usd
+
+        balance_line = f"TRX: {data['trx_amount']:.2f} (~${trx_usd:.2f}) USDT: {data['usdt_amount']:.2f} (~${usdt_usd:.2f})"
         tx_line = "\n".join(data['txs']) if data['txs'] else "нет"
 
         text = (
             f"<b>Кошелёк:</b> {short_addr} <b>Сеть:</b> {data['network']} <b>Баланс:</b> {balance_line}\n"
             f"<b>Общая сумма: ~${total:.2f}</b>\n"
             f"<b>Транзакции:</b> {tx_line}\n"
-            f"<b>ИИ:</b> {await ai_analyze({'address': address, 'trx_amount': data['trx_amount'], 'usdt_amount': data['usdt_amount'], 'total_usd': total, 'txs': data['txs']})}"
+            f"<b>ИИ:</b> {await ai_analyze(data)}"
         )
 
-        await msg.answer(text)
+        await msg.answer(text, disable_web_page_preview=True)
     except Exception as e:
-        await msg.answer(f"Ошибка: {e}")
+        await msg.answer(f"Ошибка: {str(e)}")
 
 # ==========================
 # Запуск
 # ==========================
 async def main():
-    print("CryptoDoni v8 запущен!")
+    print("CryptoDoni v9 запущен!")
     asyncio.create_task(start_web_server())
 
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(bot.session.close()))
 
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, polling_timeout=30)
 
 if __name__ == "__main__":
     asyncio.run(main())
