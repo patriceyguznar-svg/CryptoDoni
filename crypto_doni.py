@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CryptoDoni v28 — USDT + TRX + amountStr + БЕЗ КОНФЛИКТОВ
+CryptoDoni v29 — USDT + amountStr + БЕЗ КОНФЛИКТОВ
 """
 
 import os
@@ -33,15 +33,13 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 
 TRX_PRICE = 0.15
 USDT_CONTRACT = "TR7NHqjeKQxGTCuuP8qACi7c3eN6T5z"
-
-# ПРАВИЛЬНЫЙ ЗАГОЛОВОК
 HEADERS = {"apikey": TRONSCAN_API_KEY}
 
 # ==========================
-# Веб-сервер
+# Веб-сервер (чтобы Render не спал)
 # ==========================
 async def handle(request):
-    return web.Response(text="CryptoDoni v28 — amountStr Fixed")
+    return web.Response(text="CryptoDoni v29 — USDT Fixed")
 
 async def start_web_server():
     app = web.Application()
@@ -51,14 +49,13 @@ async def start_web_server():
     port = int(os.getenv("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"Веб запущен на порту {port}")
+    print(f"Веб запущен: порт {port}")
 
 # ==========================
 # Проверка кошелька
 # ==========================
 async def check_wallet(address: str) -> dict:
     result = {
-        "address": address,
         "trx": 0.0,
         "usdt": 0.0,
         "total_usd": 0.0,
@@ -68,21 +65,22 @@ async def check_wallet(address: str) -> dict:
 
     try:
         async with aiohttp.ClientSession(headers=HEADERS) as session:
-            # === 1. БАЛАНС TRX + TRC20 ===
+            # === 1. БАЛАНС ===
             url = f"https://apilist.tronscanapi.com/api/account?address={address}"
             async with session.get(url) as resp:
                 data = await resp.json()
                 print(f"API Баланс: {data}")
 
+                # TRX
                 result["trx"] = data.get("balance", 0) / 1e6
                 result["debug"] += f"TRX: {result['trx']:.6f}\n"
 
-                # USDT
+                # USDT — ищем по tokenId
                 for token in data.get("trc20token_balances", []):
                     if token.get("tokenId") == USDT_CONTRACT:
                         raw = token.get("balance", "0")
                         result["usdt"] = int(raw) / 1e6
-                        result["debug"] += f"USDT: {raw} → {result['usdt']:.6f}\n"
+                        result["debug"] += f"USDT найден: {raw} → {result['usdt']:.6f}\n"
                         print(f"USDT найден: {result['usdt']}")
                         break
                 else:
@@ -96,17 +94,19 @@ async def check_wallet(address: str) -> dict:
 
                 for tx in txs.get("data", []):
                     ctype = tx.get("contractType")
-                    if ctype == 1:  # TRX
+
+                    # TRX
+                    if ctype == 1:
                         value = int(tx.get("amount", 0)) / 1e6
                         to = tx.get("toAddress", "")[:8] + "..." + tx.get("toAddress", "")[-4:]
                         time = datetime.fromtimestamp(tx["timestamp"]/1000).strftime("%d.%m %H:%M")
                         result["txs"].append(f"<b>TRX</b> → {to}\n<code>{value:.2f}</code> | {time}")
 
-                    elif ctype == 31:  # TRC20
-                        token_id = tx.get("tokenInfo", {}).get("tokenId")
-                        if token_id == USDT_CONTRACT:
-                            # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: amountStr, а не amount_str
-                            amount_str = tx.get("amountStr", "0")
+                    # TRC20 — USDT
+                    elif ctype == 31:
+                        token_info = tx.get("tokenInfo", {})
+                        if token_info.get("tokenId") == USDT_CONTRACT:
+                            amount_str = tx.get("amountStr", "0")  # КЛЮЧЕВОЕ: amountStr
                             value = int(amount_str) / 1e6
                             to = tx.get("toAddress", "")[:8] + "..." + tx.get("toAddress", "")[-4:]
                             time = datetime.fromtimestamp(tx["timestamp"]/1000).strftime("%d.%m %H:%M")
@@ -124,7 +124,7 @@ async def check_wallet(address: str) -> dict:
     return result
 
 # ==========================
-# ИИ
+# ИИ-анализ
 # ==========================
 async def ai_analyze(data: dict) -> str:
     prompt = (
@@ -148,7 +148,7 @@ async def ai_analyze(data: dict) -> str:
 @dp.message(Command("start"))
 async def start(msg: Message):
     await msg.answer(
-        "<b>CryptoDoni v28</b>\n\n"
+        "<b>CryptoDoni v29</b>\n\n"
         "Пришли <b>TRON-адрес</b> → получишь:\n"
         "• TRX и <b>USDT</b>\n"
         "• Сумму в <b>$</b>\n"
@@ -196,7 +196,7 @@ async def handle(msg: Message):
 # Запуск
 # ==========================
 async def main():
-    print("CryptoDoni v28 запущен!")
+    print("CryptoDoni v29 запущен!")
     asyncio.create_task(start_web_server())
     await dp.start_polling(bot, polling_timeout=30)
 
