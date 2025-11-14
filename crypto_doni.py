@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CryptoDoni v2 — Полный анализ кошелька
-+ USDT, даты, контракты
+CryptoDoni v3 — Полный анализ в $
++ USDT, TRX, общая сумма, даты
 """
 
 import os
@@ -31,11 +31,14 @@ bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode=ParseMod
 dp = Dispatcher()
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# Цены в USD (обновляются при запуске)
+PRICES = {"TRX": 0.15, "USDT": 1.0}  # Будем обновлять
+
 # ==========================
 # Веб-сервер
 # ==========================
 async def handle(request):
-    return web.Response(text="CryptoDoni v2 alive")
+    return web.Response(text="CryptoDoni v3 alive")
 
 async def start_web_server():
     app = web.Application()
@@ -48,10 +51,25 @@ async def start_web_server():
     print(f"Веб-сервер на порту {port}")
 
 # ==========================
+# Обновление цен
+# ==========================
+async def update_prices():
+    global PRICES
+    try:
+        async with aiohttp.ClientSession() as session:
+            # TRX цена
+            url = "https://api.coingecko.com/api/v3/simple/price?ids=tron&vs_currencies=usd"
+            async with session.get(url) as resp:
+                data = await resp.json()
+                PRICES["TRX"] = data["tron"]["usd"]
+    except:
+        PRICES["TRX"] = 0.15  # fallback
+
+# ==========================
 # Проверка кошелька
 # ==========================
 async def check_wallet(address: str) -> dict:
-    result = {"address": address, "balances": [], "txs": [], "network": "неизвестно"}
+    result = {"address": address, "balances": [], "txs": [], "network": "неизвестно", "total_usd": 0}
 
     if address.startswith("0x") and len(address) == 42:
         result.update(await check_bep20(address))
@@ -60,6 +78,24 @@ async def check_wallet(address: str) -> dict:
     elif len(address) > 50:
         result.update(await check_solana(address))
 
+    # Обновляем цены
+    await update_prices()
+
+    # Считаем USD
+    total = 0
+    for bal in result["balances"]:
+        if "TRX" in bal:
+            amount = float(bal.split()[1])
+            usd = amount * PRICES["TRX"]
+            total += usd
+            result["balances"][result["balances"].index(bal)] = f"{bal} (~${usd:.2f})"
+        elif "USDT" in bal:
+            amount = float(bal.split()[1])
+            usd = amount * PRICES["USDT"]
+            total += usd
+            result["balances"][result["balances"].index(bal)] = f"{bal} (~${usd:.2f})"
+
+    result["total_usd"] = total
     result["ai_analysis"] = await ai_analyze(result)
     return result
 
@@ -177,6 +213,7 @@ async def ai_analyze(data: dict) -> str:
 Кошелёк: {data['address']}
 Сеть: {data['network']}
 Баланс: {', '.join(data['balances'])}
+Общая сумма: ~${data['total_usd']:.2f}
 Транзакции:
 {chr(10).join(data['txs'])}
 
@@ -198,12 +235,12 @@ async def ai_analyze(data: dict) -> str:
 @dp.message(Command("start"))
 async def start(msg: Message):
     await msg.answer(
-        "<b>CryptoDoni v2 — детектив кошельков!</b>\n\n"
+        "<b>CryptoDoni v3 — всё в $!</b>\n\n"
         "Пришли адрес:\n"
         "• <code>0x...</code> — BEP20\n"
         "• <code>T...</code> — TRON\n"
         "• <code>So1...</code> — Solana\n\n"
-        "Покажу USDT, даты, контракты и ИИ-анализ!"
+        "Покажу USDT, TRX, $ и ИИ-анализ!"
     )
 
 @dp.message()
@@ -220,7 +257,9 @@ async def handle_address(msg: Message):
         text = f"""
 <b>Кошелёк:</b> <code>{result['address']}</code>
 <b>Сеть:</b> {result['network']}
-<b>Баланс:</b> {', '.join(result['balances']) or 'пусто'}
+<b>Баланс:</b>
+{chr(10).join(result['balances']) or 'пусто'}
+<b>Общая сумма: ~${result['total_usd']:.2f}</b>
 
 <b>Транзакции:</b>
 {tx_text}
@@ -235,7 +274,7 @@ async def handle_address(msg: Message):
 # Graceful Shutdown
 # ==========================
 async def shutdown():
-    print("Остановка CryptoDoni v2...")
+    print("Остановка CryptoDoni v3...")
     await bot.session.close()
     sys.exit(0)
 
@@ -243,7 +282,7 @@ async def shutdown():
 # Запуск
 # ==========================
 async def main():
-    print("CryptoDoni v2 запущен!")
+    print("CryptoDoni v3 запущен!")
     asyncio.create_task(start_web_server())
 
     loop = asyncio.get_event_loop()
