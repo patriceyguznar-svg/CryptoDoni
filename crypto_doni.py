@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CryptoDoni v3 — Полный анализ в $
-+ USDT, TRX, общая сумма, даты
+CryptoDoni v4 — Всё в $ + USDT всегда
 """
 
 import os
@@ -31,14 +30,14 @@ bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode=ParseMod
 dp = Dispatcher()
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Цены в USD (обновляются при запуске)
-PRICES = {"TRX": 0.15, "USDT": 1.0}  # Будем обновлять
+# Цены
+PRICES = {"TRX": 0.15, "USDT": 1.0}
 
 # ==========================
 # Веб-сервер
 # ==========================
 async def handle(request):
-    return web.Response(text="CryptoDoni v3 alive")
+    return web.Response(text="CryptoDoni v4 alive")
 
 async def start_web_server():
     app = web.Application()
@@ -57,43 +56,52 @@ async def update_prices():
     global PRICES
     try:
         async with aiohttp.ClientSession() as session:
-            # TRX цена
             url = "https://api.coingecko.com/api/v3/simple/price?ids=tron&vs_currencies=usd"
             async with session.get(url) as resp:
                 data = await resp.json()
-                PRICES["TRX"] = data["tron"]["usd"]
+                PRICES["TRX"] = data.get("tron", {}).get("usd", 0.15)
     except:
-        PRICES["TRX"] = 0.15  # fallback
+        PRICES["TRX"] = 0.15
 
 # ==========================
 # Проверка кошелька
 # ==========================
 async def check_wallet(address: str) -> dict:
-    result = {"address": address, "balances": [], "txs": [], "network": "неизвестно", "total_usd": 0}
+    result = {
+        "address": address,
+        "balances": [],
+        "txs": [],
+        "network": "неизвестно",
+        "total_usd": 0.0,
+        "trx_amount": 0.0,
+        "usdt_amount": 0.0
+    }
+
+    await update_prices()
 
     if address.startswith("0x") and len(address) == 42:
         result.update(await check_bep20(address))
-    elif address.startswith("T") and len(address) == 34:
+    elif address.startswith("T") and len(address) == --34:
         result.update(await check_tron(address))
     elif len(address) > 50:
         result.update(await check_solana(address))
 
-    # Обновляем цены
-    await update_prices()
+    # --- СЧИТАЕМ USD ---
+    total = 0.0
 
-    # Считаем USD
-    total = 0
-    for bal in result["balances"]:
-        if "TRX" in bal:
-            amount = float(bal.split()[1])
-            usd = amount * PRICES["TRX"]
-            total += usd
-            result["balances"][result["balances"].index(bal)] = f"{bal} (~${usd:.2f})"
-        elif "USDT" in bal:
-            amount = float(bal.split()[1])
-            usd = amount * PRICES["USDT"]
-            total += usd
-            result["balances"][result["balances"].index(bal)] = f"{bal} (~${usd:.2f})"
+    # TRX
+    if result["trx_amount"] > 0:
+        usd = result["trx_amount"] * PRICES["TRX"]
+        total += usd
+        result["balances"].append(f"TRX: {result['trx_amount']:.2f} (~${usd:.2f})")
+
+    # USDT
+    if result["usdt_amount"] > 0:
+        usd = result["usdt_amount"] * PRICES["USDT"]
+        total += usd
+        result["balances"].append(f"USDT: {result['usdt_amount']:.2f} (~${usd:.2f})")
+    else:
+        result["balances"].append("USDT: 0.00 (~$0.00)")
 
     result["total_usd"] = total
     result["ai_analysis"] = await ai_analyze(result)
@@ -101,17 +109,17 @@ async def check_wallet(address: str) -> dict:
 
 # === BEP20 ===
 async def check_bep20(address: str) -> dict:
-    balances = []
+    trx_amount = usdt_amount = 0.0
     txs = []
     async with aiohttp.ClientSession() as session:
-        # BNB
+        # BNB (не TRX, но оставим как пример)
         url = f"https://api.bscscan.com/api?module=account&action=balance&address={address}"
         async with session.get(url) as resp:
             data = await resp.json()
             if data.get("status") == "1":
                 bnb = int(data["result"]) / 1e18
                 if bnb > 0:
-                    balances.append(f"BNB: {bnb:.6f}")
+                    txs.append(f"BNB: {bnb:.6f}")
 
         # USDT
         usdt_contract = "0x55d398326f99059fF775485246999027B3197955"
@@ -119,11 +127,9 @@ async def check_bep20(address: str) -> dict:
         async with session.get(url) as resp:
             data = await resp.json()
             if data.get("status") == "1":
-                usdt = int(data["result"]) / 1e18
-                if usdt > 0:
-                    balances.append(f"USDT: {usdt:.2f}")
+                usdt_amount = int(data["result"]) / 1e18
 
-        # Транзакции BNB
+        # Транзакции
         url = f"https://api.bscscan.com/api?module=account&action=txlist&address={address}&sort=desc&offset=5"
         async with session.get(url) as resp:
             data = await resp.json()
@@ -134,22 +140,11 @@ async def check_bep20(address: str) -> dict:
                     time = datetime.fromtimestamp(int(tx["timeStamp"])).strftime('%d.%m %H:%M')
                     txs.append(f"→ {to} | {value:.6f} BNB | {time}")
 
-        # Транзакции USDT
-        url = f"https://api.bscscan.com/api?module=account&action=tokentx&contractaddress={usdt_contract}&address={address}&sort=desc&offset=3"
-        async with session.get(url) as resp:
-            data = await resp.json()
-            if data.get("status") == "1":
-                for tx in data["result"][:2]:
-                    value = int(tx["value"]) / 1e18
-                    to = tx["to"][:10] + "..." if tx["to"] else "contract"
-                    time = datetime.fromtimestamp(int(tx["timeStamp"])).strftime('%d.%m %H:%M')
-                    txs.append(f"→ {to} | {value:.2f} USDT | {time}")
-
-    return {"network": "BEP20", "balances": balances, "txs": txs}
+    return {"network": "BEP20", "trx_amount": 0, "usdt_amount": usdt_amount, "txs": txs}
 
 # === TRON ===
 async def check_tron(address: str) -> dict:
-    balances = []
+    trx_amount = usdt_amount = 0.0
     txs = []
     async with aiohttp.ClientSession() as session:
         url = f"https://api.trongrid.io/v1/accounts/{address}"
@@ -157,20 +152,16 @@ async def check_tron(address: str) -> dict:
             data = await resp.json()
             if "data" in data and data["data"]:
                 acc = data["data"][0]
-                trx = acc.get("balance", 0) / 1e6
-                if trx > 0:
-                    balances.append(f"TRX: {trx:.2f}")
+                trx_amount = acc.get("balance", 0) / 1e6
 
-                # USDT TRC20
+                # USDT
                 usdt_contract = "TR7NHqjeKQxGTCuuP8qACi7c3eN6T5z"
                 for token in acc.get("trc20", []):
                     contract = list(token.keys())[0]
                     if contract == usdt_contract:
-                        usdt = int(list(token.values())[0]) / 1e6
-                        if usdt > 0:
-                            balances.append(f"USDT: {usdt:.2f}")
+                        usdt_amount = int(list(token.values())[0]) / 1e6
 
-                # TRC20 USDT транзакции
+                # USDT транзакции
                 url = f"https://api.trongrid.io/v1/accounts/{address}/transactions/trc20?limit=3&contract_address={usdt_contract}"
                 async with session.get(url) as resp:
                     data = await resp.json()
@@ -191,31 +182,21 @@ async def check_tron(address: str) -> dict:
                             time = datetime.fromtimestamp(tx["block_timestamp"] / 1000).strftime('%d.%m %H:%M')
                             txs.append(f"→ {to} | {value:.2f} TRX | {time}")
 
-    return {"network": "TRON", "balances": balances, "txs": txs}
+    return {"network": "TRON", "trx_amount": trx_amount, "usdt_amount": usdt_amount, "txs": txs}
 
 # === SOLANA ===
 async def check_solana(address: str) -> dict:
-    balances = []
-    async with aiohttp.ClientSession() as session:
-        url = "https://api.mainnet-beta.solana.com"
-        payload = {"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [address]}
-        async with session.post(url, json=payload) as resp:
-            data = await resp.json()
-            if "result" in data:
-                sol = data["result"]["value"] / 1e9
-                if sol > 0:
-                    balances.append(f"SOL: {sol:.4f}")
-    return {"network": "Solana", "balances": balances, "txs": []}
+    return {"network": "Solana", "trx_amount": 0, "usdt_amount": 0, "txs": []}
 
 # === ИИ-АНАЛИЗ ===
 async def ai_analyze(data: dict) -> str:
     prompt = f"""
 Кошелёк: {data['address']}
 Сеть: {data['network']}
-Баланс: {', '.join(data['balances'])}
+TRX: {data['trx_amount']:.2f}, USDT: {data['usdt_amount']:.2f}
 Общая сумма: ~${data['total_usd']:.2f}
 Транзакции:
-{chr(10).join(data['txs'])}
+{chr(10).join(data['txs']) if data['txs'] else 'нет'}
 
 Это скам? Кратко: СКАМ / НОРМ / РИСК + 1 предложение.
 """
@@ -235,12 +216,12 @@ async def ai_analyze(data: dict) -> str:
 @dp.message(Command("start"))
 async def start(msg: Message):
     await msg.answer(
-        "<b>CryptoDoni v3 — всё в $!</b>\n\n"
+        "<b>CryptoDoni v4 — всё в $!</b>\n\n"
         "Пришли адрес:\n"
         "• <code>0x...</code> — BEP20\n"
         "• <code>T...</code> — TRON\n"
         "• <code>So1...</code> — Solana\n\n"
-        "Покажу USDT, TRX, $ и ИИ-анализ!"
+        "Покажу TRX, USDT, $ и ИИ-анализ!"
     )
 
 @dp.message()
@@ -258,7 +239,8 @@ async def handle_address(msg: Message):
 <b>Кошелёк:</b> <code>{result['address']}</code>
 <b>Сеть:</b> {result['network']}
 <b>Баланс:</b>
-{chr(10).join(result['balances']) or 'пусто'}
+{chr(10).join(result['balances'])}
+
 <b>Общая сумма: ~${result['total_usd']:.2f}</b>
 
 <b>Транзакции:</b>
@@ -274,7 +256,7 @@ async def handle_address(msg: Message):
 # Graceful Shutdown
 # ==========================
 async def shutdown():
-    print("Остановка CryptoDoni v3...")
+    print("Остановка CryptoDoni v4...")
     await bot.session.close()
     sys.exit(0)
 
@@ -282,7 +264,7 @@ async def shutdown():
 # Запуск
 # ==========================
 async def main():
-    print("CryptoDoni v3 запущен!")
+    print("CryptoDoni v4 запущен!")
     asyncio.create_task(start_web_server())
 
     loop = asyncio.get_event_loop()
