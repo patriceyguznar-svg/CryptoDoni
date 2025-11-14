@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CryptoDoni v31 — USDT через /account/tokens + amountStr
+CryptoDoni v33 — USDT via /account/tokens + /usdt command
 """
 
 import os
@@ -39,7 +39,7 @@ HEADERS = {"apikey": TRONSCAN_API_KEY}
 # Веб-сервер
 # ==========================
 async def handle(request):
-    return web.Response(text="CryptoDoni v31 — USDT via /tokens")
+    return web.Response(text="CryptoDoni v33 — USDT via /tokens")
 
 async def start_web_server():
     app = web.Application()
@@ -50,6 +50,25 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     print(f"Веб запущен: порт {port}")
+
+# ==========================
+# Получение USDT баланса (ТВОЯ ФУНКЦИЯ!)
+# ==========================
+async def get_usdt_balance(address: str) -> float:
+    url = f"https://apilist.tronscanapi.com/api/account/tokens?address={address}&start=0&limit=200"
+    try:
+        async with aiohttp.ClientSession(headers=HEADERS) as session:
+            async with session.get(url) as resp:
+                data = await resp.json()
+                for token in data.get("data", []):
+                    if token.get("tokenName") == USDT_TOKEN_NAME:
+                        decimals = token.get("tokenDecimal", 6)
+                        raw = token.get("balance", "0")
+                        return int(raw) / (10 ** decimals)
+                return 0.0
+    except Exception as e:
+        print(f"USDT API ошибка: {e}")
+        return -1.0
 
 # ==========================
 # Проверка кошелька
@@ -65,29 +84,19 @@ async def check_wallet(address: str) -> dict:
 
     try:
         async with aiohttp.ClientSession(headers=HEADERS) as session:
-            # === 1. БАЛАНС TRX ===
+            # === 1. TRX ===
             url_account = f"https://apilist.tronscanapi.com/api/account?address={address}"
             async with session.get(url_account) as resp:
                 data = await resp.json()
                 result["trx"] = data.get("balance", 0) / 1e6
                 result["debug"] += f"TRX: {result['trx']:.6f}\n"
 
-            # === 2. USDT ЧЕРЕЗ /account/tokens (ТВОЙ СПОСОБ!) ===
-            url_tokens = f"https://apilist.tronscanapi.com/api/account/tokens?address={address}&start=0&limit=200"
-            async with session.get(url_tokens) as resp:
-                tokens_data = await resp.json()
-                result["debug"] += f"Токены: {len(tokens_data.get('data', []))}\n"
-
-                for token in tokens_data.get("data", []):
-                    if token.get("tokenName") == USDT_TOKEN_NAME:
-                        decimals = token.get("tokenDecimal", 6)
-                        raw = token.get("balance", "0")
-                        result["usdt"] = int(raw) / (10 ** decimals)
-                        result["debug"] += f"USDT: {raw} / 10^{decimals} = {result['usdt']:.6f}\n"
-                        print(f"USDT найден: {result['usdt']}")
-                        break
-                else:
-                    result["debug"] += "USDT не найден в /tokens\n"
+            # === 2. USDT — ТВОЯ ФУНКЦИЯ ===
+            result["usdt"] = await get_usdt_balance(address)
+            if result["usdt"] >= 0:
+                result["debug"] += f"USDT: {result['usdt']:.6f}\n"
+            else:
+                result["debug"] += "USDT: ошибка API\n"
 
             # === 3. ТРАНЗАКЦИИ ===
             url_tx = f"https://apilist.tronscanapi.com/api/transaction?limit=5&address={address}&sort=-timestamp"
@@ -97,12 +106,11 @@ async def check_wallet(address: str) -> dict:
 
                 for tx in txs.get("data", []):
                     ctype = tx.get("contractType")
-
                     if ctype == 1:  # TRX
                         value = int(tx.get("amount", 0)) / 1e6
                         to = tx.get("toAddress", "")[:8] + "..." + tx.get("toAddress", "")[-4:]
                         time = datetime.fromtimestamp(tx["timestamp"]/1000).strftime("%d.%m %H:%M")
-                        result["txs"].append(f"<b>TRX</b> → {to}\n<code>{value:.2f}</code> | {time}")
+                        result["txs"].append(f"<b>TRX</b> to {to}\n<code>{value:.2f}</code> | {time}")
 
                     elif ctype == 31:  # TRC20
                         token_info = tx.get("tokenInfo", {})
@@ -111,16 +119,13 @@ async def check_wallet(address: str) -> dict:
                             value = int(amount_str) / 1e6
                             to = tx.get("toAddress", "")[:8] + "..." + tx.get("toAddress", "")[-4:]
                             time = datetime.fromtimestamp(tx["timestamp"]/1000).strftime("%d.%m %H:%M")
-                            result["txs"].append(f"<b>USDT</b> → {to}\n<code>{value:.2f}</code> | {time}")
+                            result["txs"].append(f"<b>USDT</b> to {to}\n<code>{value:.2f}</code> | {time}")
 
             result["txs"] = result["txs"][:3]
             result["total_usd"] = result["trx"] * TRX_PRICE + result["usdt"]
 
     except Exception as e:
-        error = f"Ошибка: {type(e).__name__}: {e}"
-        print(error)
-        result["txs"].append("Ошибка API")
-        result["debug"] += error
+        result["debug"] += f"Ошибка: {e}"
 
     return result
 
@@ -144,26 +149,56 @@ async def ai_analyze(data: dict) -> str:
         return f"ИИ: ошибка ({e})"
 
 # ==========================
-# Команды
+# /start
 # ==========================
 @dp.message(Command("start"))
 async def start(msg: Message):
     await msg.answer(
-        "<b>CryptoDoni v31</b>\n\n"
-        "Пришли <b>TRON-адрес</b> → получишь:\n"
-        "• TRX и <b>USDT</b>\n"
-        "• Сумму в <b>$</b>\n"
-        "• Транзакции\n"
-        "• ИИ-анализ\n\n"
-        "<i>Пример: TDqhrxGnktwBCim5ZXcJPvMWASSfYWsdt6</i>",
+        "<b>CryptoDoni v33</b>\n\n"
+        "Пришли <b>TRON-адрес</b> → полный анализ\n"
+        "Или используй: <code>/usdt TDqhrxGn...</code> → только USDT",
         parse_mode=ParseMode.HTML
     )
 
+# ==========================
+# /usdt — НОВАЯ КОМАНДА!
+# ==========================
+@dp.message(Command("usdt"))
+async def usdt_command(msg: Message):
+    args = msg.text.strip().split(maxsplit=1)
+    if len(args) < 2:
+        await msg.answer("Использование:\n<code>/usdt TDqhrxGnktwBCim5ZXcJPvMWASSfYWsdt6</code>", parse_mode=ParseMode.HTML)
+        return
+
+    address = args[1].strip()
+    if not (address.startswith("T") and len(address) == 34):
+        await msg.answer("Неверный адрес!")
+        return
+
+    short = address[:8] + "..." + address[-6:]
+    await msg.answer("Проверяю USDT...")
+
+    usdt = await get_usdt_balance(address)
+
+    if usdt == -1.0:
+        await msg.answer("Ошибка API")
+    elif usdt == 0.0:
+        await msg.answer(f"<b>USDT не найден</b>\n<code>{short}</code>", parse_mode=ParseMode.HTML)
+    else:
+        await msg.answer(
+            f"<b>Баланс USDT:</b>\n"
+            f"<code>{short}</code>\n"
+            f"<b>{usdt:.2f} USDT</b>",
+            parse_mode=ParseMode.HTML
+        )
+
+# ==========================
+# Основной ввод (адрес без команды)
+# ==========================
 @dp.message()
 async def handle(msg: Message):
     address = msg.text.strip()
     if not (address.startswith("T") and len(address) == 34):
-        await msg.answer("Неверный адрес!\nПример: <code>TDqhrxGnktwBCim5ZXcJPvMWASSfYWsdt6</code>", parse_mode=ParseMode.HTML)
         return
 
     await msg.answer("Проверяю...")
@@ -172,22 +207,20 @@ async def handle(msg: Message):
     short = address[:8] + "..." + address[-6:]
 
     trx_usd = data["trx"] * TRX_PRICE
-    usdt_usd = data["usdt"]
 
     txs_text = "\n\n".join(data["txs"]) if data["txs"] else "—"
 
     text = (
         f"<b>Кошелёк:</b> <code>{short}</code>\n"
         f"<b>Сеть:</b> TRON\n\n"
-        f"<b>Баланс:</b>\n"
+        f"<b>Банс:</b>\n"
         f"   • TRX: <b>{data['trx']:.2f}</b> (~<b>${trx_usd:.2f}</b>)\n"
-        f"   • USDT: <b>{data['usdt']:.2f}</b> (~<b>${usdt_usd:.2f}</b>)\n\n"
+        f"   • USDT: <b>{data['usdt']:.2f}</b> (~<b>${data['usdt']:.2f}</b>)\n\n"
         f"<b>Общая сумма: ~<u>${data['total_usd']:.2f}</u></b>\n\n"
         f"<b>Последние транзакции:</b>\n{txs_text}\n\n"
         f"<b>ИИ-анализ:</b>\n{await ai_analyze(data)}"
     )
 
-    # ДЕБАГ ТОЛЬКО ПРИ USDT = 0
     if data["usdt"] == 0:
         text += f"\n\n<b>DEBUG:</b>\n<pre>{data['debug']}</pre>"
 
@@ -197,7 +230,7 @@ async def handle(msg: Message):
 # Запуск
 # ==========================
 async def main():
-    print("CryptoDoni v31 запущен!")
+    print("CryptoDoni v33 запущен!")
     asyncio.create_task(start_web_server())
     await dp.start_polling(bot, polling_timeout=30)
 
