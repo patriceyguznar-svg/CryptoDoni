@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CryptoDoni v31 — точный USDT и TRX, без исправлений
+CryptoDoni v31 — точный USDT и TRX, с поиском по названию
 """
-
 import os
 import asyncio
 import aiohttp
@@ -30,10 +29,8 @@ if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, TRONSCAN_API_KEY]):
 bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 client = OpenAI(api_key=OPENAI_API_KEY)
-
 TRX_PRICE = 0.15
 USDT_CONTRACT = "TR7NHqjeKQxGTCuuP8qACi7c3eN6T5z"
-
 HEADERS = {
     "apikey": TRONSCAN_API_KEY,
     "accept": "application/json",
@@ -70,7 +67,6 @@ async def check_wallet(address: str) -> dict:
 
     try:
         async with aiohttp.ClientSession(headers=HEADERS) as session:
-
             # === TRX баланс ===
             url_acc = f"https://apilist.tronscanapi.com/api/account?address={address}"
             async with session.get(url_acc, timeout=10) as resp:
@@ -78,18 +74,37 @@ async def check_wallet(address: str) -> dict:
                 result["trx"] = acc.get("balance", 0) / 1e6
                 result["debug"] += f"TRX: {result['trx']}\n"
 
-            # === USDT баланс (фактический) ===
+            # === USDT баланс (по названию + ID) ===
             url_tokens = f"https://apilist.tronscanapi.com/api/account/tokens?address={address}&start=0&limit=200"
             async with session.get(url_tokens, timeout=10) as resp:
                 tok = await resp.json()
+                usdt_found = False
                 for t in tok.get("data", []):
-                    if t.get("tokenId") == USDT_CONTRACT:
+                    token_name = t.get("tokenName", "").strip()
+                    token_abbr = t.get("tokenAbbr", "").strip()
+                    token_id = t.get("tokenId", "")
+
+                    is_usdt_by_name = (
+                        "tether" in token_name.lower() and
+                        "usd" in token_name.lower() and
+                        token_abbr.upper() == "USDT"
+                    )
+                    is_usdt_by_id = token_id == USDT_CONTRACT
+
+                    if is_usdt_by_name or is_usdt_by_id:
                         raw = t.get("balance", "0")
-                        result["usdt"] = int(raw) / 1e6
-                        result["debug"] += f"USDT: {raw} → {result['usdt']}\n"
+                        try:
+                            result["usdt"] = int(raw) / 1e6
+                            method = "названию" if is_usdt_by_name else "ID"
+                            result["debug"] += f"USDT: {raw} → {result['usdt']} (по {method})\n"
+                        except (ValueError, TypeError):
+                            result["usdt"] = 0.0
+                            result["debug"] += f"USDT: ошибка парсинга balance={raw}\n"
+                        usdt_found = True
                         break
-                else:
-                    result["debug"] += "USDT not found\n"
+
+                if not usdt_found:
+                    result["debug"] += "USDT не найден\n"
 
             # === Транзакции ===
             url_tx = f"https://apilist.tronscanapi.com/api/transaction?limit=5&address={address}&sort=-timestamp"
@@ -100,18 +115,28 @@ async def check_wallet(address: str) -> dict:
                     ctype = tx.get("contractType")
                     time = datetime.fromtimestamp(tx["timestamp"]/1000).strftime("%d.%m %H:%M")
                     to = tx.get("toAddress", "")
-                    to_short = to[:8] + "..." + to[-4:]
+                    to_short = to[:8] + "..." + to[-4:] if to else "?"
 
-                    if ctype == 1:
+                    if ctype == 1:  # TRX
                         value = int(tx.get("amount", 0)) / 1e6
                         result["txs"].append(f"<b>TRX</b> → {to_short}\n<code>{value}</code> | {time}")
-                    elif ctype == 31:
+                    elif ctype == 31:  # TRC-20
                         token_info = tx.get("tokenInfo", {})
-                        if token_info.get("tokenId") == USDT_CONTRACT:
+                        token_name = token_info.get("tokenName", "").lower()
+                        token_abbr = token_info.get("tokenAbbr", "")
+                        token_id = token_info.get("tokenId", "")
+
+                        if (token_id == USDT_CONTRACT or
+                            ("tether" in token_name and "usd" in token_name and token_abbr == "USDT")):
                             raw = tx.get("amountStr", "0")
-                            value = int(raw) / 1e6
-                            result["txs"].append(f"<b>USDT</b> → {to_short}\n<code>{value}</code> | {time}")
-                            result["total_usd"] = result["trx"] * TRX_PRICE + result["usdt"]
+                            try:
+                                value = int(raw) / 1e6
+                                result["txs"].append(f"<b>USDT</b> → {to_short}\n<code>{value}</code> | {time}")
+                            except (ValueError, TypeError):
+                                pass
+
+            # === ИТОГО (один раз!) ===
+            result["total_usd"] = round(result["trx"] * TRX_PRICE + result["usdt"], 2)
 
     except Exception as e:
         result["debug"] += f"GLOBAL ERROR: {e}\n"
@@ -161,13 +186,10 @@ async def handle_wallet(msg: Message):
         return
 
     await msg.answer("Проверяю...")
-
     data = await check_wallet(address)
     short = address[:8] + "..." + address[-6:]
-
-    trx_usd = data["trx"] * TRX_PRICE
+    trx_usd = round(data["trx"] * TRX_PRICE, 2)
     usdt_usd = data["usdt"]
-
     txs_text = "\n\n".join(data["txs"]) if data["txs"] else "—"
 
     text = (
@@ -175,15 +197,12 @@ async def handle_wallet(msg: Message):
         f"<b>Сеть:</b> TRON\n\n"
         f"<b>Баланс:</b>\n"
         f"• TRX: <b>{data['trx']}</b> (~${trx_usd})\n"
-        f"• USDT: <b>{data['usdt']}</b> (~${usdt_usd})\n\n"
+        f"• USDT: <b>{data['usdt']}</b>\n\n"
         f"<b>Итого: <u>${data['total_usd']}</u></b>\n\n"
         f"<b>Последние транзакции:</b>\n{txs_text}\n\n"
         f"<b>ИИ-анализ:</b>\n{await ai_analyze(data)}"
     )
-
-    # DEBUG всегда можно выводить при проблемах
     text += f"\n\n<b>DEBUG:</b>\n<pre>{data['debug']}</pre>"
-
     await msg.answer(text, disable_web_page_preview=True)
 
 # ==========================
