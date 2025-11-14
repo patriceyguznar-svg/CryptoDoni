@@ -194,5 +194,5 @@ async def main():
     asyncio.create_task(start_web_server())
     await dp.start_polling(bot, polling_timeout=30)
 
-if name == "main":
+if_name_== "_main_":
     asyncio.run(main())
